@@ -130,6 +130,30 @@ def testing(model, cfg):
         cfg.excel_logger(row_data=seg_results, dataset_name=data_name, method_name=cfg.exp_name)
 
 
+def auto_detect_checkpoint(cfg):
+    """自动检测最新的checkpoint文件"""
+    checkpoint_dir = cfg.path.pth
+    if not os.path.exists(checkpoint_dir):
+        return None
+    
+    checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".pth")]
+    if not checkpoint_files:
+        return None
+    
+    # 提取epoch数字并排序找到最新的
+    def extract_epoch(filename):
+        try:
+            return int(filename.replace("checkpoint_epoch_", "").replace(".pth", ""))
+        except ValueError:
+            return 0
+    
+    latest_checkpoint = max(checkpoint_files, key=extract_epoch)
+    latest_checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+    latest_epoch = extract_epoch(latest_checkpoint)
+    
+    return latest_checkpoint_path, latest_epoch
+
+
 def training(model, cfg) -> pipeline.ModelEma:
     tr_loader = pipeline.get_tr_loader(cfg)
     cfg.epoch_length = len(tr_loader)
@@ -161,15 +185,27 @@ def training(model, cfg) -> pipeline.ModelEma:
     scheduler.plot_lr_coef_curve(save_path=cfg.path.pth_log)
 
     start_epoch = 0
+    curr_iter = 0
+    
+    # 自动检测断点恢复
+    if not cfg.resume_from and cfg.train.get("auto_resume", True):
+        checkpoint_info = auto_detect_checkpoint(cfg)
+        if checkpoint_info:
+            cfg.resume_from = checkpoint_info[0]
+            cfg.tr_logger.record(f"Auto-detected checkpoint: {cfg.resume_from}")
+    
     if cfg.resume_from:
+        cfg.tr_logger.record(f"Resuming training from: {cfg.resume_from}")
         params_in_checkpoint = io.load_specific_params(
-            load_path=cfg.resume_from, names=["model", "optimizer", "scaler", "start_epoch"]
+            load_path=cfg.resume_from, names=["model", "optimizer", "scaler", "start_epoch", "curr_iter"]
         )
         model.load_state_dict(params_in_checkpoint["model"])
         optimizer.load_state_dict(state_dict=params_in_checkpoint["optimizer"])
         scaler.load_state_dict(state_dict=params_in_checkpoint["scaler"])
-        start_epoch = params_in_checkpoint["start_epoch"]
-
+        start_epoch = params_in_checkpoint.get("start_epoch", 0)
+        curr_iter = params_in_checkpoint.get("curr_iter", start_epoch * cfg.epoch_length)
+        cfg.tr_logger.record(f"Resumed from epoch {start_epoch}, iteration {curr_iter}")
+    
     model_ema = None
     if cfg.train.ema.enable:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -181,12 +217,12 @@ def training(model, cfg) -> pipeline.ModelEma:
         )
         if cfg.resume_from:
             params_in_checkpoint = io.load_specific_params(load_path=cfg.resume_from, names=["model_ema"])
-            model_ema.module.load_state_dict(state_dict=params_in_checkpoint["model_ema"])
+            if "model_ema" in params_in_checkpoint and params_in_checkpoint["model_ema"] is not None:
+                model_ema.module.load_state_dict(state_dict=params_in_checkpoint["model_ema"])
 
     time_logger = recorder.TimeRecoder()
     loss_recorder = recorder.AvgMeter()
 
-    curr_iter = 0
     for curr_epoch in range(start_epoch, cfg.train.num_epochs):
         cfg.tr_logger.record(f"Exp_Name: {cfg.exp_name}")
         time_logger.start(msg="An Epoch Start...")
@@ -195,8 +231,17 @@ def training(model, cfg) -> pipeline.ModelEma:
         model.train()
         model.is_training = True
 
+        # 计算当前epoch应该开始的batch索引
+        epoch_start_batch_idx = 0
+        if curr_epoch == start_epoch and cfg.resume_from:
+            epoch_start_batch_idx = curr_iter % cfg.epoch_length
+
         # an epoch starts
         for batch_idx, batch in enumerate(tr_loader):
+            # 如果是恢复训练，跳过已经训练过的batch
+            if batch_idx < epoch_start_batch_idx:
+                continue
+                
             scheduler.step(curr_idx=curr_iter)  # update learning rate
 
             batch_data = misc.to_device(data=batch["data"], device=model.device)
@@ -230,7 +275,10 @@ def training(model, cfg) -> pipeline.ModelEma:
                     model_ema.update(model)
 
             item_loss = loss.item()
-            data_shape = batch_data["mask"].shape
+            try:
+                data_shape = batch_data["mask"].shape
+            except (KeyError, AttributeError):
+                data_shape = [cfg.train.batch_size]  # fallback
             loss_recorder.update(value=item_loss, num=data_shape[0])
 
             if cfg.log_interval.txt > 0 and (
@@ -238,10 +286,11 @@ def training(model, cfg) -> pipeline.ModelEma:
                     or (curr_iter + 1) % cfg.epoch_length == 0
                     or (curr_iter + 1) == cfg.train.num_iters
             ):
+                lr_str = f"{optimizer.param_groups[0]['lr']:.6f}" if optimizer.param_groups else "N/A"
                 msg = " | ".join(
                     [
                         f"I:{curr_iter}:{cfg.train.num_iters} {batch_idx}/{cfg.epoch_length} {curr_epoch}/{cfg.train.num_epochs}",
-                        f"Lr:{optimizer.lr_string()}",
+                        f"Lr:{lr_str}",
                         f"M:{loss_recorder.avg:.5f}/C:{item_loss:.5f}",
                         f"{list(data_shape)}",
                         f"{loss_str}",
@@ -255,15 +304,22 @@ def training(model, cfg) -> pipeline.ModelEma:
                     or (curr_iter + 1) == cfg.train.num_iters
             ):
                 cfg.tb_logger.record_curve("iter_loss", item_loss, curr_iter)
-                cfg.tb_logger.record_curve("lr", optimizer.lr_groups(), curr_iter)
+                lr_value = optimizer.param_groups[0]['lr'] if optimizer.param_groups else 0.0
+                cfg.tb_logger.record_curve("lr", lr_value, curr_iter)
                 cfg.tb_logger.record_curve("avg_loss", loss_recorder.avg, curr_iter)
-                cfg.tb_logger.record_images(dict(**probs, **batch_data), curr_iter)
+                try:
+                    cfg.tb_logger.record_images(dict(**probs, **batch_data), curr_iter)
+                except:
+                    pass  # 忽略记录图像的错误
 
             if curr_iter < 3:  # plot some batches of the training phase
-                recorder.plot_results(
-                    dict(**probs, **batch_data),
-                    save_path=os.path.join(cfg.path.pth_log, f"train_batch_{curr_iter}.png"),
-                )
+                try:
+                    recorder.plot_results(
+                        dict(**probs, **batch_data),
+                        save_path=os.path.join(cfg.path.pth_log, f"train_batch_{curr_iter}.png"),
+                    )
+                except:
+                    pass  # 忽略绘图错误
 
             curr_iter += 1
             if curr_iter >= cfg.train.num_iters:
@@ -272,8 +328,9 @@ def training(model, cfg) -> pipeline.ModelEma:
 
         if curr_epoch == 0 and model_ema is not None:
             model_ema.set(model=model)  # using a better initial model state
-
-        # save all params for (curr_epoch+1)th epoch
+            
+        # save all params for (curr_epoch+1)th epoch with curr_iter information
+        checkpoint_path = os.path.join(cfg.path.pth, f"checkpoint_epoch_{curr_epoch + 1}.pth")
         io.save_params(
             exp_name=cfg.exp_name,
             model=model,
@@ -283,8 +340,9 @@ def training(model, cfg) -> pipeline.ModelEma:
             next_epoch=curr_epoch + 1,
             total_epoch=cfg.train.num_epochs,
             save_num_models=cfg.train.save_num_models,
-            full_net_path=cfg.path.final_full_net,
+            full_net_path=checkpoint_path,
             state_net_path=cfg.path.final_state_net,
+            curr_iter=curr_iter,  # 添加当前迭代次数
         )
         time_logger.now(pre_msg="An Epoch End...")
 

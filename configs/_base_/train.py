@@ -6,6 +6,7 @@ train = dict(
     num_iters=30000,
     epoch_based=True,
     lr=0.0001,
+    auto_resume=True,  # 自动检测并恢复训练
     optimizer=dict(
         mode="adamw",
         set_to_none=True,
@@ -39,5 +40,6 @@ train = dict(
         cmp_with_origin=True,
         force_cpu=False,
         decay=0.9998,
+        keep_original_test=False,
     ),
 )

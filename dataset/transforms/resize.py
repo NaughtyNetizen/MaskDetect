@@ -55,7 +55,7 @@ def ms_resize(img, scales, base_h=None, base_w=None, interpolation=cv2.INTER_LIN
     else:
         h = base_h
         w = base_w
-    return [A.resize(img, height=int(h * s), width=int(w * s), interpolation=interpolation) for s in scales]
+    return [cv2.resize(img, (int(w * s), int(h * s)), interpolation=interpolation) for s in scales]
 
 
 def ss_resize(img, scale, base_h=None, base_w=None, interpolation=cv2.INTER_LINEAR):
@@ -65,4 +65,5 @@ def ss_resize(img, scale, base_h=None, base_w=None, interpolation=cv2.INTER_LINE
     else:
         h = base_h
         w = base_w
-    return A.resize(img, height=int(h * scale), width=int(w * scale), interpolation=interpolation)
+    # 使用 cv2.resize 替代 A.resize
+    return cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=interpolation)

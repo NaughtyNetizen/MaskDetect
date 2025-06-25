@@ -55,8 +55,8 @@ def construct_path(output_dir: str, exp_name: str) -> dict:
     tr_log_path = os.path.join(pth_log_path, f"tr_{str(datetime.now())[:10]}.txt")
     te_log_path = os.path.join(pth_log_path, f"te_{str(datetime.now())[:10]}.txt")
     trans_log_path = os.path.join(pth_log_path, f"trans_{str(datetime.now())[:10]}.txt")
-    cfg_copy_path = os.path.join(pth_log_path, f"cfg_{str(datetime.now())}.py")
-    trainer_copy_path = os.path.join(pth_log_path, f"trainer_{str(datetime.now())}.txt")
+    cfg_copy_path = os.path.join(pth_log_path, f"cfg_{str(datetime.now()).replace(':', '-')}.py")
+    trainer_copy_path = os.path.join(pth_log_path, f"trainer_{str(datetime.now()).replace(':', '-')}.txt")
     excel_path = os.path.join(pth_log_path, f"results.xlsx")
 
     path_config = {

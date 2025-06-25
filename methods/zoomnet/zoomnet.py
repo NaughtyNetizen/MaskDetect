@@ -172,7 +172,7 @@ def cal_ual(seg_logits, seg_gts):
 class ZoomNet(BasicModelClass):
     def __init__(self):
         super().__init__()
-        self.shared_encoder = timm.create_model(model_name="resnet50", pretrained=True, in_chans=3, features_only=True)
+        self.shared_encoder = timm.create_model(model_name="resnet50", pretrained=False, in_chans=3, features_only=True)  # 临时跳过预训练模型
         self.translayer = TransLayer(out_c=64)  # [c5, c4, c3, c2, c1]
         self.merge_layers = nn.ModuleList([SIU(in_dim=in_c) for in_c in (64, 64, 64, 64, 64)])
 

@@ -21,6 +21,7 @@ def save_params(
     total_epoch=-1,
     save_num_models=1,
     scaler=None,
+    curr_iter=None,
 ):
     """
     ::
@@ -56,6 +57,7 @@ def save_params(
                     opti_state=opti_state,
                     sche_state=sche_state,
                     scaler=scaler_state,
+                    curr_iter=curr_iter,
                 ),
                 full_net_path,
             )
@@ -94,6 +96,7 @@ def load_specific_params(load_path, names):
         scaler="scaler",
         start_epoch="epoch",
         model_ema="ema_net_state",
+        curr_iter="curr_iter",
     )
 
     assert os.path.exists(load_path) and os.path.isfile(load_path), load_path
@@ -108,7 +111,11 @@ def load_specific_params(load_path, names):
         if checkpoint.get(mapped_name, None) is not None:
             parmas_dict[n] = checkpoint[mapped_name]
         else:
-            raise KeyError(f"There is not '{mapped_name}' in {load_path}: {list(checkpoint.keys())}")
+            # 对于curr_iter，如果不存在则设为None，不抛出错误
+            if n == "curr_iter":
+                parmas_dict[n] = None
+            else:
+                raise KeyError(f"There is not '{mapped_name}' in {load_path}: {list(checkpoint.keys())}")
     return parmas_dict
 
 
